@@ -6,7 +6,7 @@ from torch.nn.functional import silu
 
 from .latentnet import *
 from .unet import *
-from choices import *
+from model_enums import *
 
 
 @dataclass
@@ -14,7 +14,7 @@ class BeatGANsAutoencConfig(BeatGANsUNetConfig):
     # number of style channels
     enc_out_channels: int = 512
     enc_attn_resolutions: Tuple[int] = None
-    enc_pool: str = 'depthconv'
+    enc_pool: str = "depthconv"
     enc_num_res_block: int = 2
     enc_channel_mult: Tuple[int] = None
     enc_grad_checkpoint: bool = False
@@ -42,8 +42,9 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             out_hid_channels=conf.enc_out_channels,
             out_channels=conf.enc_out_channels,
             num_res_blocks=conf.enc_num_res_block,
-            attention_resolutions=(conf.enc_attn_resolutions
-                                   or conf.attention_resolutions),
+            attention_resolutions=(
+                conf.enc_attn_resolutions or conf.attention_resolutions
+            ),
             dropout=conf.dropout,
             channel_mult=conf.enc_channel_mult or conf.channel_mult,
             use_time_condition=False,
@@ -84,12 +85,15 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
 
     def encode(self, x):
         cond = self.encoder.forward(x)
-        return {'cond': cond}
+        return {"cond": cond}
 
     @property
     def stylespace_sizes(self):
-        modules = list(self.input_blocks.modules()) + list(
-            self.middle_block.modules()) + list(self.output_blocks.modules())
+        modules = (
+            list(self.input_blocks.modules())
+            + list(self.middle_block.modules())
+            + list(self.output_blocks.modules())
+        )
         sizes = []
         for module in modules:
             if isinstance(module, ResBlock):
@@ -101,8 +105,11 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         """
         encode to style space
         """
-        modules = list(self.input_blocks.modules()) + list(
-            self.middle_block.modules()) + list(self.output_blocks.modules())
+        modules = (
+            list(self.input_blocks.modules())
+            + list(self.middle_block.modules())
+            + list(self.output_blocks.modules())
+        )
         # (n, c)
         cond = self.encoder.forward(x)
         S = []
@@ -118,16 +125,18 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         else:
             return S
 
-    def forward(self,
-                x,
-                t,
-                y=None,
-                x_start=None,
-                cond=None,
-                style=None,
-                noise=None,
-                t_cond=None,
-                **kwargs):
+    def forward(
+        self,
+        x,
+        t,
+        y=None,
+        x_start=None,
+        cond=None,
+        style=None,
+        noise=None,
+        t_cond=None,
+        **kwargs,
+    ):
         """
         Apply the model to an input batch.
 
@@ -136,6 +145,7 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             cond: output of the encoder
             noise: random noise (to predict the cond)
         """
+        # print(noise)
 
         if t_cond is None:
             t_cond = t
@@ -146,10 +156,10 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
 
         if cond is None:
             if x is not None:
-                assert len(x) == len(x_start), f'{len(x)} != {len(x_start)}'
+                assert len(x) == len(x_start), f"{len(x)} != {len(x_start)}"
 
             tmp = self.encode(x_start)
-            cond = tmp['cond']
+            cond = tmp["cond"]
 
         if t is not None:
             _t_emb = timestep_embedding(t, self.conf.model_channels)
@@ -158,13 +168,14 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             # this happens when training only autoenc
             _t_emb = None
             _t_cond_emb = None
-
+        # print(self.conf.resnet_two_cond)
         if self.conf.resnet_two_cond:
             res = self.time_embed.forward(
                 time_emb=_t_emb,
                 cond=cond,
                 time_cond_emb=_t_cond_emb,
             )
+            # print(res)
         else:
             raise NotImplementedError()
 
@@ -188,7 +199,8 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             raise NotImplementedError()
             # assert y.shape == (x.shape[0], )
             # emb = emb + self.label_emb(y)
-
+        # sprint(emb)
+        # print("---" , cond_emb)
         # where in the model to supply time conditions
         enc_time_emb = emb
         mid_time_emb = emb
@@ -201,6 +213,10 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
         # hs = []
         hs = [[] for _ in range(len(self.conf.channel_mult))]
 
+        ##############################################################
+        ##########THIS IS WHERE THE GRADIENT WRT COND GET LOST########
+        ##############################################################
+
         if x is not None:
             h = x.type(self.dtype)
 
@@ -208,16 +224,23 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
             k = 0
             for i in range(len(self.input_num_blocks)):
                 for j in range(self.input_num_blocks[i]):
-                    h = self.input_blocks[k](h,
-                                             emb=enc_time_emb,
-                                             cond=enc_cond_emb)
+                    # h.requires_grad_(True)
+                    #######################
+                    #### self.input_block##
+                    #######################
+                    h = self.input_blocks[k](h, emb=enc_time_emb, cond=enc_cond_emb)
 
-                    # print(i, j, h.shape)
+                    # print(h)
                     hs[i].append(h)
                     k += 1
             assert k == len(self.input_blocks)
+            # print(k)
 
             # middle blocks
+            #######################
+            #### self.middle_block#
+            #######################
+
             h = self.middle_block(h, emb=mid_time_emb, cond=mid_cond_emb)
         else:
             # no lateral connections
@@ -237,14 +260,18 @@ class BeatGANsAutoencModel(BeatGANsUNetModel):
                 except IndexError:
                     lateral = None
                     # print(i, j, lateral)
-
-                h = self.output_blocks[k](h,
-                                          emb=dec_time_emb,
-                                          cond=dec_cond_emb,
-                                          lateral=lateral)
+                #######################
+                #### self.output_blocks
+                #######################
+                h = self.output_blocks[k](
+                    h, emb=dec_time_emb, cond=dec_cond_emb, lateral=lateral
+                )
                 k += 1
-
+        # print(h)
         pred = self.out(h)
+        # pred.requires_grad_(True)
+        ##############################################################
+        # print(pred)
         return AutoencReturn(pred=pred, cond=cond)
 
 
@@ -279,5 +306,7 @@ class TimeStyleSeperateEmbed(nn.Module):
             time_emb = None
         else:
             time_emb = self.time_embed(time_emb)
+
         style = self.style(cond)
+
         return EmbedReturn(emb=style, time_emb=time_emb, style=style)

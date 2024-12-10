@@ -1,10 +1,26 @@
-from config import *
-from dataset import *
+# from config import *
+# from dataset import *
 import pandas as pd
 import json
 import os
 import copy
-
+from torch import nn
+import torch.nn.functional as F
+from general_config import (
+    TrainConfig,
+    TrainMode,
+    ManipulateMode,
+    ManipulateLossType,
+    data_paths,
+)
+from modules import BeatGANsAutoencModel
+from dataset import (
+    CelebAttrDataset,
+    CelebHQAttrDataset,
+    CelebD2CAttrFewshotDataset,
+    Repeat,
+)
+from metrics import get_world_size
 import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
@@ -46,19 +62,18 @@ class ClsModel(pl.LightningModule):
             self.ema_model.eval()
 
             if conf.pretrain is not None:
-                print(f'loading pretrain ... {conf.pretrain.name}')
-                state = torch.load(conf.pretrain.path, map_location='cpu')
-                print('step:', state['global_step'])
-                self.load_state_dict(state['state_dict'], strict=False)
+                print(f"loading pretrain ... {conf.pretrain.name}")
+                state = torch.load(conf.pretrain.path, map_location="cpu")
+                print("step:", state["global_step"])
+                self.load_state_dict(state["state_dict"], strict=False)
 
             # load the latent stats
             if conf.manipulate_znormalize:
-                print('loading latent stats ...')
+                print("loading latent stats ...")
                 state = torch.load(conf.latent_infer_path)
-                self.conds = state['conds']
-                self.register_buffer('conds_mean',
-                                     state['conds_mean'][None, :])
-                self.register_buffer('conds_std', state['conds_std'][None, :])
+                self.conds = state["conds"]
+                self.register_buffer("conds_mean", state["conds_mean"][None, :])
+                self.register_buffer("conds_std", state["conds_std"][None, :])
             else:
                 self.conds_mean = None
                 self.conds_std = None
@@ -83,9 +98,9 @@ class ClsModel(pl.LightningModule):
         # don't save the base model
         out = {}
         for k, v in super().state_dict(*args, **kwargs).items():
-            if k.startswith('model.'):
+            if k.startswith("model."):
                 pass
-            elif k.startswith('ema_model.'):
+            elif k.startswith("ema_model."):
                 pass
             else:
                 out[k] = v
@@ -102,13 +117,11 @@ class ClsModel(pl.LightningModule):
         return super().load_state_dict(state_dict, strict=strict)
 
     def normalize(self, cond):
-        cond = (cond - self.conds_mean.to(self.device)) / self.conds_std.to(
-            self.device)
+        cond = (cond - self.conds_mean.to(self.device)) / self.conds_std.to(self.device)
         return cond
 
     def denormalize(self, cond):
-        cond = (cond * self.conds_std.to(self.device)) + self.conds_mean.to(
-            self.device)
+        cond = (cond * self.conds_std.to(self.device)) + self.conds_mean.to(self.device)
         return cond
 
     def load_dataset(self):
@@ -116,7 +129,7 @@ class ClsModel(pl.LightningModule):
             return CelebD2CAttrFewshotDataset(
                 cls_name=self.conf.manipulate_cls,
                 K=self.conf.manipulate_shots,
-                img_folder=data_paths['celeba'],
+                img_folder=data_paths["celeba"],
                 img_size=self.conf.img_size,
                 seed=self.conf.manipulate_seed,
                 all_neg=False,
@@ -125,7 +138,7 @@ class ClsModel(pl.LightningModule):
         elif self.conf.manipulate_mode == ManipulateMode.d2c_fewshot_allneg:
             # positive-unlabeled classifier needs to keep the class ratio 1:1
             # we use two dataloaders, one for each class, to stabiliize the training
-            img_folder = data_paths['celeba']
+            img_folder = data_paths["celeba"]
 
             return [
                 CelebD2CAttrFewshotDataset(
@@ -137,7 +150,8 @@ class ClsModel(pl.LightningModule):
                     only_cls_value=1,
                     seed=self.conf.manipulate_seed,
                     all_neg=True,
-                    do_augment=True),
+                    do_augment=True,
+                ),
                 CelebD2CAttrFewshotDataset(
                     cls_name=self.conf.manipulate_cls,
                     K=self.conf.manipulate_shots,
@@ -147,13 +161,16 @@ class ClsModel(pl.LightningModule):
                     only_cls_value=-1,
                     seed=self.conf.manipulate_seed,
                     all_neg=True,
-                    do_augment=True),
+                    do_augment=True,
+                ),
             ]
         elif self.conf.manipulate_mode == ManipulateMode.celebahq_all:
-            return CelebHQAttrDataset(data_paths['celebahq'],
-                                      self.conf.img_size,
-                                      data_paths['celebahq_anno'],
-                                      do_augment=True)
+            return CelebHQAttrDataset(
+                data_paths["celebahq"],
+                self.conf.img_size,
+                data_paths["celebahq_anno"],
+                do_augment=True,
+            )
         else:
             raise NotImplementedError()
 
@@ -165,7 +182,7 @@ class ClsModel(pl.LightningModule):
             np.random.seed(seed)
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
-            print('local seed:', seed)
+            print("local seed:", seed)
         ##############################################
 
         self.train_data = self.load_dataset()
@@ -190,13 +207,10 @@ class ClsModel(pl.LightningModule):
         if isinstance(self.train_data, list):
             dataloader = []
             for each in self.train_data:
-                dataloader.append(
-                    conf.make_loader(each, shuffle=True, drop_last=True))
+                dataloader.append(conf.make_loader(each, shuffle=True, drop_last=True))
             dataloader = ZipLoader(dataloader)
         else:
-            dataloader = conf.make_loader(self.train_data,
-                                          shuffle=True,
-                                          drop_last=True)
+            dataloader = conf.make_loader(self.train_data, shuffle=True, drop_last=True)
         return dataloader
 
     @property
@@ -209,12 +223,12 @@ class ClsModel(pl.LightningModule):
         self.ema_model: BeatGANsAutoencModel
         if isinstance(batch, tuple):
             a, b = batch
-            imgs = torch.cat([a['img'], b['img']])
-            labels = torch.cat([a['labels'], b['labels']])
+            imgs = torch.cat([a["img"], b["img"]])
+            labels = torch.cat([a["labels"], b["labels"]])
         else:
-            imgs = batch['img']
+            imgs = batch["img"]
             # print(f'({self.global_rank}) imgs:', imgs.shape)
-            labels = batch['labels']
+            labels = batch["labels"]
 
         if self.conf.train_mode == TrainMode.manipulate:
             self.ema_model.eval()
@@ -237,14 +251,16 @@ class ClsModel(pl.LightningModule):
             imgs_t = self.sampler.q_sample(imgs, t)
             pred = self.classifier.forward(imgs_t, t=t)
             pred_ema = None
-            print('pred:', pred.shape)
+            print("pred:", pred.shape)
         else:
             raise NotImplementedError()
 
         if self.conf.manipulate_mode.is_celeba_attr():
-            gt = torch.where(labels > 0,
-                             torch.ones_like(labels).float(),
-                             torch.zeros_like(labels).float())
+            gt = torch.where(
+                labels > 0,
+                torch.ones_like(labels).float(),
+                torch.zeros_like(labels).float(),
+            )
         elif self.conf.manipulate_mode == ManipulateMode.relighting:
             gt = labels
         else:
@@ -261,18 +277,21 @@ class ClsModel(pl.LightningModule):
         else:
             raise NotImplementedError()
 
-        self.log('loss', loss)
-        self.log('loss_ema', loss_ema)
+        self.log("loss", loss)
+        self.log("loss_ema", loss_ema)
         return loss
 
-    def on_train_batch_end(self, outputs, batch, batch_idx: int,
-                           dataloader_idx: int) -> None:
+    def on_train_batch_end(
+        self, outputs, batch, batch_idx: int, dataloader_idx: int
+    ) -> None:
         ema(self.classifier, self.ema_classifier, self.conf.ema_decay)
 
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.classifier.parameters(),
-                                 lr=self.conf.lr,
-                                 weight_decay=self.conf.weight_decay)
+        optim = torch.optim.Adam(
+            self.classifier.parameters(),
+            lr=self.conf.lr,
+            weight_decay=self.conf.weight_decay,
+        )
         return optim
 
 
@@ -280,24 +299,25 @@ def ema(source, target, decay):
     source_dict = source.state_dict()
     target_dict = target.state_dict()
     for key in source_dict.keys():
-        target_dict[key].data.copy_(target_dict[key].data * decay +
-                                    source_dict[key].data * (1 - decay))
+        target_dict[key].data.copy_(
+            target_dict[key].data * decay + source_dict[key].data * (1 - decay)
+        )
 
 
 def train_cls(conf: TrainConfig, gpus):
-    print('conf:', conf.name)
+    print("conf:", conf.name)
     model = ClsModel(conf)
 
     if not os.path.exists(conf.logdir):
         os.makedirs(conf.logdir)
     checkpoint = ModelCheckpoint(
-        dirpath=f'{conf.logdir}',
+        dirpath=f"{conf.logdir}",
         save_last=True,
         save_top_k=1,
         # every_n_train_steps=conf.save_every_samples //
         # conf.batch_size_effective,
     )
-    checkpoint_path = f'{conf.logdir}/last.ckpt'
+    checkpoint_path = f"{conf.logdir}/last.ckpt"
     if os.path.exists(checkpoint_path):
         resume = checkpoint_path
     else:
@@ -307,9 +327,9 @@ def train_cls(conf: TrainConfig, gpus):
         else:
             resume = None
 
-    tb_logger = pl_loggers.TensorBoardLogger(save_dir=conf.logdir,
-                                             name=None,
-                                             version='')
+    tb_logger = pl_loggers.TensorBoardLogger(
+        save_dir=conf.logdir, name=None, version=""
+    )
 
     # from pytorch_lightning.
 
@@ -317,8 +337,9 @@ def train_cls(conf: TrainConfig, gpus):
     if len(gpus) == 1:
         accelerator = None
     else:
-        accelerator = 'ddp'
+        accelerator = "ddp"
         from pytorch_lightning.plugins import DDPPlugin
+
         # important for working with gradient checkpoint
         plugins.append(DDPPlugin(find_unused_parameters=False))
 

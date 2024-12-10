@@ -5,22 +5,105 @@ from numbers import Number
 
 import torch as th
 import torch.nn.functional as F
-from choices import *
-from config_base import BaseConfig
-from torch import nn
+from model_enums import *
 
-from .nn import (avg_pool_nd, conv_nd, linear, normalization,
-                 timestep_embedding, torch_checkpoint, zero_module)
+# from modules.unet import BaseConfig
+from copy import deepcopy
+from torch import nn
+import math
+from numbers import Number
+import os
+import json
+import numpy as np
+
+from .nn import (
+    avg_pool_nd,
+    conv_nd,
+    linear,
+    normalization,
+    timestep_embedding,
+    torch_checkpoint,
+    zero_module,
+)
+
+
+def jsonable(x):
+    try:
+        json.dumps(x)
+        return True
+    except TypeError:
+        return False
+
+
+@dataclass
+class BaseConfig:
+    def clone(self):
+        return deepcopy(self)
+
+    def inherit(self, another):
+        """inherit common keys from a given config"""
+        common_keys = set(self.__dict__.keys()) & set(another.__dict__.keys())
+        for k in common_keys:
+            setattr(self, k, getattr(another, k))
+
+    def propagate(self):
+        """push down the configuration to all members"""
+        for k, v in self.__dict__.items():
+            if isinstance(v, BaseConfig):
+                v.inherit(self)
+                v.propagate()
+
+    def save(self, save_path):
+        """save config to json file"""
+        dirname = os.path.dirname(save_path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+        conf = self.as_dict_jsonable()
+        with open(save_path, "w") as f:
+            json.dump(conf, f)
+
+    def load(self, load_path):
+        """load json config"""
+        with open(load_path) as f:
+            conf = json.load(f)
+        self.from_dict(conf)
+
+    def from_dict(self, dict, strict=False):
+        for k, v in dict.items():
+            if not hasattr(self, k):
+                if strict:
+                    raise ValueError(f"loading extra '{k}'")
+                else:
+                    print(f"loading extra '{k}'")
+                    continue
+            if isinstance(self.__dict__[k], BaseConfig):
+                self.__dict__[k].from_dict(v)
+            else:
+                self.__dict__[k] = v
+
+    def as_dict_jsonable(self):
+        conf = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, BaseConfig):
+                conf[k] = v.as_dict_jsonable()
+            else:
+                if jsonable(v):
+                    conf[k] = v
+                else:
+                    # ignore not jsonable
+                    pass
+        return conf
 
 
 class ScaleAt(Enum):
-    after_norm = 'afternorm'
+    after_norm = "afternorm"
 
 
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
     """
+
     @abstractmethod
     def forward(self, x, emb=None, cond=None, lateral=None):
         """
@@ -33,6 +116,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     A sequential module that passes timestep embeddings to the children that
     support it as an extra input.
     """
+
     def forward(self, x, emb=None, cond=None, lateral=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
@@ -92,6 +176,7 @@ class ResBlock(TimestepBlock):
         - act
         - conv
     """
+
     def __init__(self, conf: ResBlockConfig):
         super().__init__()
         self.conf = conf
@@ -103,7 +188,7 @@ class ResBlock(TimestepBlock):
         layers = [
             normalization(conf.channels),
             nn.SiLU(),
-            conv_nd(conf.dims, conf.channels, conf.out_channels, 3, padding=1)
+            conv_nd(conf.dims, conf.channels, conf.out_channels, 3, padding=1),
         ]
         self.in_layers = nn.Sequential(*layers)
 
@@ -137,11 +222,9 @@ class ResBlock(TimestepBlock):
             # OUT LAYERS (ignored when there is no condition)
             #############################
             # original version
-            conv = conv_nd(conf.dims,
-                           conf.out_channels,
-                           conf.out_channels,
-                           3,
-                           padding=1)
+            conv = conv_nd(
+                conf.dims, conf.out_channels, conf.out_channels, 3, padding=1
+            )
             if conf.use_zero_module:
                 # zere out the weights
                 # it seems to help training
@@ -176,11 +259,13 @@ class ResBlock(TimestepBlock):
                 kernel_size = 1
                 padding = 0
 
-            self.skip_connection = conv_nd(conf.dims,
-                                           conf.channels,
-                                           conf.out_channels,
-                                           kernel_size,
-                                           padding=padding)
+            self.skip_connection = conv_nd(
+                conf.dims,
+                conf.channels,
+                conf.out_channels,
+                kernel_size,
+                padding=padding,
+            )
 
     def forward(self, x, emb=None, cond=None, lateral=None):
         """
@@ -190,8 +275,9 @@ class ResBlock(TimestepBlock):
             x: input
             lateral: lateral connection from the encoder
         """
-        return torch_checkpoint(self._forward, (x, emb, cond, lateral),
-                                self.conf.use_checkpoint)
+        return torch_checkpoint(
+            self._forward, (x, emb, cond, lateral), self.conf.use_checkpoint
+        )
 
     def _forward(
         self,
@@ -202,7 +288,7 @@ class ResBlock(TimestepBlock):
     ):
         """
         Args:
-            lateral: required if "has_lateral" and non-gated, with gated, it can be supplied optionally    
+            lateral: required if "has_lateral" and non-gated, with gated, it can be supplied optionally
         """
         if self.conf.has_lateral:
             # lateral may be supplied even if it doesn't require
@@ -344,6 +430,7 @@ class Upsample(nn.Module):
     :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
                  upsampling occurs in the inner-two dimensions.
     """
+
     def __init__(self, channels, use_conv, dims=2, out_channels=None):
         super().__init__()
         self.channels = channels
@@ -351,17 +438,14 @@ class Upsample(nn.Module):
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = conv_nd(dims,
-                                self.channels,
-                                self.out_channels,
-                                3,
-                                padding=1)
+            self.conv = conv_nd(dims, self.channels, self.out_channels, 3, padding=1)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
         if self.dims == 3:
-            x = F.interpolate(x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2),
-                              mode="nearest")
+            x = F.interpolate(
+                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+            )
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
         if self.use_conv:
@@ -378,6 +462,7 @@ class Downsample(nn.Module):
     :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
                  downsampling occurs in the inner-two dimensions.
     """
+
     def __init__(self, channels, use_conv, dims=2, out_channels=None):
         super().__init__()
         self.channels = channels
@@ -386,12 +471,9 @@ class Downsample(nn.Module):
         self.dims = dims
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
-            self.op = conv_nd(dims,
-                              self.channels,
-                              self.out_channels,
-                              3,
-                              stride=stride,
-                              padding=1)
+            self.op = conv_nd(
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=1
+            )
         else:
             assert self.channels == self.out_channels
             self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
@@ -408,6 +490,7 @@ class AttentionBlock(nn.Module):
     Originally ported from here, but adapted to the N-d case.
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
     """
+
     def __init__(
         self,
         channels,
@@ -438,7 +521,7 @@ class AttentionBlock(nn.Module):
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
-        return torch_checkpoint(self._forward, (x, ), self.use_checkpoint)
+        return torch_checkpoint(self._forward, (x,), self.use_checkpoint)
 
     def _forward(self, x):
         b, c, *spatial = x.shape
@@ -473,6 +556,7 @@ class QKVAttentionLegacy(nn.Module):
     """
     A module which performs QKV attention. Matches legacy QKVAttention + input/ouput heads shaping
     """
+
     def __init__(self, n_heads):
         super().__init__()
         self.n_heads = n_heads
@@ -487,12 +571,11 @@ class QKVAttentionLegacy(nn.Module):
         bs, width, length = qkv.shape
         assert width % (3 * self.n_heads) == 0
         ch = width // (3 * self.n_heads)
-        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch,
-                                                                       dim=1)
+        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum(
-            "bct,bcs->bts", q * scale,
-            k * scale)  # More stable with f16 than dividing afterwards
+            "bct,bcs->bts", q * scale, k * scale
+        )  # More stable with f16 than dividing afterwards
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
         a = th.einsum("bts,bcs->bct", weight, v)
         return a.reshape(bs, -1, length)
@@ -506,6 +589,7 @@ class QKVAttention(nn.Module):
     """
     A module which performs QKV attention and splits in a different order.
     """
+
     def __init__(self, n_heads):
         super().__init__()
         self.n_heads = n_heads
@@ -528,8 +612,7 @@ class QKVAttention(nn.Module):
             (k * scale).view(bs * self.n_heads, ch, length),
         )  # More stable with f16 than dividing afterwards
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
-        a = th.einsum("bts,bcs->bct", weight,
-                      v.reshape(bs * self.n_heads, ch, length))
+        a = th.einsum("bts,bcs->bct", weight, v.reshape(bs * self.n_heads, ch, length))
         return a.reshape(bs, -1, length)
 
     @staticmethod
@@ -541,6 +624,7 @@ class AttentionPool2d(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
     """
+
     def __init__(
         self,
         spacial_dim: int,
@@ -550,7 +634,8 @@ class AttentionPool2d(nn.Module):
     ):
         super().__init__()
         self.positional_embedding = nn.Parameter(
-            th.randn(embed_dim, spacial_dim**2 + 1) / embed_dim**0.5)
+            th.randn(embed_dim, spacial_dim**2 + 1) / embed_dim**0.5
+        )
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
         self.num_heads = embed_dim // num_heads_channels

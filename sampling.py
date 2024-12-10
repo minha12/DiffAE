@@ -1,16 +1,22 @@
-from config import *
+# from config import *
+from general_config import TrainConfig, TrainMode
+from diffusion import Sampler
 
-from torch.cuda import amp
+# from torch.cuda import amp
+import torch
+from modules import BeatGANsAutoencModel
 
 
-def render_uncondition(conf: TrainConfig,
-                       model: BeatGANsAutoencModel,
-                       x_T,
-                       sampler: Sampler,
-                       latent_sampler: Sampler,
-                       conds_mean=None,
-                       conds_std=None,
-                       clip_latent_noise: bool = False):
+def render_uncondition(
+    conf: TrainConfig,
+    model: BeatGANsAutoencModel,
+    x_T,
+    sampler: Sampler,
+    latent_sampler: Sampler,
+    conds_mean=None,
+    conds_std=None,
+    clip_latent_noise: bool = False,
+):
     device = x_T.device
     if conf.train_mode == TrainMode.diffusion:
         assert conf.model_type.can_sample()
@@ -53,8 +59,6 @@ def render_condition(
         # returns {'cond', 'cond2'}
         if cond is None:
             cond = model.encode(x_start)
-        return sampler.sample(model=model,
-                              noise=x_T,
-                              model_kwargs={'cond': cond})
+        return sampler.sample(model=model, noise=x_T, model_kwargs={"cond": cond})
     else:
         raise NotImplementedError()
